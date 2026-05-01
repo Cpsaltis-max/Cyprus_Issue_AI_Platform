@@ -1041,7 +1041,7 @@ if "latest_round_id" not in st.session_state:
 
 show_logo_header()
 lang = st.selectbox(
-    "Language / Ξ“Ξ»ΟΟƒΟƒΞ± / Dil",
+    "Language selection / Επιλογή γλώσσας / Dil seçimi",
     list(LANGUAGE_OPTIONS.keys()),
     format_func=lambda code: LANGUAGE_OPTIONS[code],
 )
