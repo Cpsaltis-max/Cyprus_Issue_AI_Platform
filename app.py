@@ -1,6 +1,7 @@
 import re
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -9,12 +10,84 @@ from google import genai
 # =========================================================
 # CONFIG
 # =========================================================
-import os
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+API_KEY = "AIzaSyC9Gr5n6ptSI0qPqR1Ah5nXqhr0azuOc3w"
+client = genai.Client(api_key=API_KEY)
 
 RESPONSES_FILE = "responses.csv"
 ROUNDS_FILE = "statement_rounds.csv"
 RANKINGS_FILE = "rankings.csv"
+
+GSP_LOGO = Path("gsp_logo.png")
+UCFS_LOGO = Path("ucfs_logo.png")
+
+TOPICS = {
+    "procedural_impasse": {
+        "label": "Breaking the procedural impasse and agreeing a way to restart negotiations",
+        "short": "Procedural impasse",
+    },
+    "security_guarantees": {
+        "label": "How to best resolve the issue of Security and Guarantees",
+        "short": "Security and Guarantees",
+    },
+    "territory": {
+        "label": "Territory",
+        "short": "Territory",
+    },
+    "properties": {
+        "label": "Properties",
+        "short": "Properties",
+    },
+    "governance_power_sharing": {
+        "label": "Governance and Power Sharing",
+        "short": "Governance and Power Sharing",
+    },
+}
+
+TOPIC_IDS = list(TOPICS.keys())
+
+COMMUNITY_OPTIONS = {
+    "Greek Cypriot": "GC",
+    "Turkish Cypriot": "TC",
+    "Other": "Other",
+}
+
+SEED_RESPONSES = {
+    "procedural_impasse": [
+        ("GC", "A restart should begin with a short agenda agreed by both leaders, focused first on confidence-building and then on the core chapters. The UN should help define a clear sequence so neither side feels trapped."),
+        ("TC", "Negotiations can restart only if Turkish Cypriot political equality is accepted from the beginning. A process that leaves this vague will again produce mistrust and collapse."),
+        ("GC", "The process should resume from the convergences already reached, but with safeguards that prevent endless talks. There should be milestones and public reporting on progress."),
+        ("TC", "Both communities need assurance that talks are not just symbolic. A balanced timetable, equal participation, and respect for prior agreements could make restarting negotiations credible."),
+        ("Other", "The impasse can be broken by separating the question of how to talk from the final outcome. First agree rules, timeline, and guarantees of good faith, then move to substance."),
+    ],
+    "security_guarantees": [
+        ("GC", "I would support a settlement where foreign troops leave according to a clear timetable and external guarantees are replaced by international monitoring and implementation mechanisms."),
+        ("TC", "Security must not leave Turkish Cypriots feeling exposed. Any new system should include credible safeguards, effective political equality, and rapid remedies if the agreement is violated."),
+        ("GC", "The best solution would remove unilateral intervention rights and create a security framework linked to the EU, UN, and bicommunal institutions that both communities can trust."),
+        ("TC", "Guarantees should evolve, not disappear overnight. Turkish Cypriots need confidence that their safety and status will be protected if relations deteriorate."),
+        ("Other", "A balanced approach would combine demilitarisation, international verification, internal power-sharing safeguards, and a review mechanism after implementation begins."),
+    ],
+    "territory": [
+        ("GC", "Territorial adjustment should allow as many displaced people as possible to return under Greek Cypriot administration while keeping the Turkish Cypriot constituent state viable."),
+        ("TC", "Territory should be handled carefully so Turkish Cypriots do not feel they are losing security or economic continuity. Adjustments must be limited and linked to compensation."),
+        ("GC", "A fair territorial settlement should prioritise areas with strong refugee claims and symbolic importance, while avoiding unnecessary disruption for current residents."),
+        ("TC", "Any map must protect community viability and avoid creating new displacement without proper housing, compensation, and transition support."),
+        ("Other", "Territory can be resolved only through a package that links maps, property remedies, compensation funds, and phased implementation."),
+    ],
+    "properties": [
+        ("GC", "Owners should have a meaningful right to restitution where possible, especially when properties are unused or of major personal importance, with compensation where return is not feasible."),
+        ("TC", "Current users must also be protected. A property settlement should avoid mass disruption and include fair compensation, exchange, and gradual implementation."),
+        ("GC", "The property issue needs independent commissions that treat individual claims seriously and do not turn ownership rights into a purely political bargain."),
+        ("TC", "A workable solution should recognise both original ownership and decades of current use. People need certainty, affordability, and no sudden eviction."),
+        ("Other", "The strongest approach would offer a menu of restitution, exchange, compensation, and leasing, guided by transparent criteria and adequate funding."),
+    ],
+    "governance_power_sharing": [
+        ("GC", "Governance should protect political equality without creating permanent deadlock. Shared institutions need clear decision rules and practical ways to resolve disputes."),
+        ("TC", "Power sharing must make Turkish Cypriots effective partners, not a minority that can be overruled. Rotating presidency and positive votes are important safeguards."),
+        ("GC", "I would support federal governance if it is functional, respects one citizenship and one international personality, and prevents abuse of veto powers."),
+        ("TC", "A settlement must include effective participation at federal level and strong constituent state competences so each community feels secure."),
+        ("Other", "The best model would combine political equality, functionality, dispute-resolution mechanisms, and incentives for cross-community cooperation."),
+    ],
+}
 
 # =========================================================
 # HELPERS
@@ -50,6 +123,117 @@ def safe_text(value) -> str:
     if text.lower() == "nan":
         return ""
     return text
+
+
+def topic_label(topic_id: str) -> str:
+    return TOPICS.get(topic_id, TOPICS["security_guarantees"])["label"]
+
+
+def topic_short_label(topic_id: str) -> str:
+    return TOPICS.get(topic_id, TOPICS["security_guarantees"])["short"]
+
+
+def infer_topic_id(value) -> str:
+    text = safe_text(value).lower()
+    if text in TOPICS:
+        return text
+    if "proced" in text or "restart" in text or "negotiat" in text or "impasse" in text:
+        return "procedural_impasse"
+    if "security" in text or "guarantee" in text:
+        return "security_guarantees"
+    if "territor" in text:
+        return "territory"
+    if "propert" in text:
+        return "properties"
+    if "govern" in text or "power" in text:
+        return "governance_power_sharing"
+    return "security_guarantees"
+
+
+def normalize_response_topics(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "topic_id" not in out.columns:
+        out["topic_id"] = ""
+    if "is_seed" not in out.columns:
+        out["is_seed"] = False
+
+    out["topic_id"] = out.apply(
+        lambda row: infer_topic_id(row.get("topic_id") or row.get("issue")),
+        axis=1,
+    )
+    out["issue"] = out["topic_id"].map(topic_label)
+    out["is_seed"] = out["is_seed"].fillna(False).astype(str).str.lower().isin(["true", "1", "yes"])
+    return out
+
+
+def normalize_round_topics(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "topic_id" not in out.columns:
+        out["topic_id"] = ""
+    if out.empty:
+        return out
+    out["topic_id"] = out.apply(
+        lambda row: infer_topic_id(row.get("topic_id") or row.get("issue")),
+        axis=1,
+    )
+    out["issue"] = out["topic_id"].map(topic_label)
+    return out
+
+
+def ensure_seed_responses(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
+    existing_ids = set(clean_text_series(df["id"]).tolist()) if "id" in df.columns else set()
+    rows = []
+
+    for topic_id, seeds in SEED_RESPONSES.items():
+        for index, (community, text) in enumerate(seeds, start=1):
+            seed_id = f"seed-{topic_id}-{index}"
+            if seed_id in existing_ids:
+                continue
+            rows.append(
+                {
+                    "id": seed_id,
+                    "timestamp": "2026-05-01T00:00:00",
+                    "community": community,
+                    "topic_id": topic_id,
+                    "issue": topic_label(topic_id),
+                    "negotiation_restart": 50,
+                    "governance": 50,
+                    "security": 50,
+                    "territory": 50,
+                    "property": 50,
+                    "text": text,
+                    "is_seed": True,
+                }
+            )
+
+    if not rows:
+        return df, False
+
+    return pd.concat([df, pd.DataFrame(rows)], ignore_index=True), True
+
+
+def show_logo_header() -> None:
+    if not GSP_LOGO.exists() and not UCFS_LOGO.exists():
+        return
+
+    left, middle, right = st.columns([1.1, 3.2, 1.1])
+    with left:
+        if GSP_LOGO.exists():
+            st.image(str(GSP_LOGO), use_container_width=True)
+    with right:
+        if UCFS_LOGO.exists():
+            st.image(str(UCFS_LOGO), use_container_width=True)
+    st.markdown("<div style='height: 0.5rem;'></div>", unsafe_allow_html=True)
+
+
+def anchored_slider(label: str, key: str, value: int = 50) -> int:
+    slider_value = st.slider(label, 0, 100, value, key=key)
+    left, spacer, right = st.columns([1.4, 2, 1.4])
+    with left:
+        st.caption("0 = Not at all important")
+    with right:
+        st.caption("100 = Very important")
+    return slider_value
 
 
 def parse_candidate_statements(raw_text: str) -> dict:
@@ -245,11 +429,12 @@ Rules:
 # FILE LOAD
 # =========================================================
 responses_cols = [
-    "id", "timestamp", "community", "issue",
-    "governance", "security", "territory", "property", "text"
+    "id", "timestamp", "community", "topic_id", "issue",
+    "negotiation_restart", "governance", "security", "territory", "property", "text",
+    "is_seed",
 ]
 rounds_cols = [
-    "round_id", "timestamp", "scope", "issue",
+    "round_id", "timestamp", "scope", "topic_id", "issue",
     "statement_a", "statement_b", "statement_c", "statement_d",
     "key_tensions", "raw_output", "winning_statement", "refined_statement"
 ]
@@ -263,6 +448,13 @@ responses_df = load_csv(RESPONSES_FILE, responses_cols)
 rounds_df = load_csv(ROUNDS_FILE, rounds_cols)
 rankings_df = load_csv(RANKINGS_FILE, rankings_cols)
 
+responses_df = normalize_response_topics(responses_df)
+responses_df, seeds_added = ensure_seed_responses(responses_df)
+if seeds_added:
+    save_csv(responses_df, RESPONSES_FILE)
+
+rounds_df = normalize_round_topics(rounds_df)
+
 # =========================================================
 # SESSION STATE
 # =========================================================
@@ -274,25 +466,51 @@ if "latest_round_id" not in st.session_state:
 # =========================================================
 st.set_page_config(page_title="Cyprus Deliberation Platform", layout="wide")
 
+show_logo_header()
 st.title("Cyprus Deliberation Platform")
-st.write("Please share your views anonymously.")
+st.write(
+    """
+    This platform invites you to take part in an anonymous deliberation process on key dimensions of the Cyprus issue.
+    First, you define your community and choose the topic you want to discuss. You then indicate how important several
+    dimensions of a future peace package are for your own judgement, and write in your own words what kind of arrangement
+    you would support and why.
+
+    The Habermas Machine then uses participant responses within the same topic to generate alternative collective
+    statements. Participants can rank these statements and add comments. The aim is not to force agreement, but to make
+    shared concerns, disagreements, and possible bridging proposals more visible in a structured and transparent way.
+    """
+)
+
+selected_topic_id = st.selectbox(
+    "Topic",
+    TOPIC_IDS,
+    format_func=topic_label,
+    help="Responses and generated statements are analysed only within the selected topic.",
+)
+selected_topic_label = topic_label(selected_topic_id)
 
 # =========================================================
 # RESPONSE FORM
 # =========================================================
 st.subheader("Submit a response")
 
-community = st.selectbox("Community", ["", "GC", "TC", "Other"])
-issue = st.text_input("Issue", "security")
+community_label = st.selectbox("Please define your community", list(COMMUNITY_OPTIONS.keys()))
+community = COMMUNITY_OPTIONS[community_label]
+st.caption(f"Selected topic: {selected_topic_label}")
+
+negotiation_restart = anchored_slider(
+    "Please state how important it is for you to define exactly how the negotiations will restart and whether there should be any consequences for the side that the UN decide is to blame in case of collapse",
+    key="negotiation_restart",
+)
 
 st.markdown(
     "**Please state which dimension of the Cyprus issue has more weight in how you will judge whether to accept or reject an agreed peace package in a referendum**"
 )
 
-governance = st.slider("Governance", 0, 100, 50)
-security = st.slider("Security", 0, 100, 50)
-territory = st.slider("Territory", 0, 100, 50)
-property_q = st.slider("Property", 0, 100, 50)
+governance = anchored_slider("Governance", key="governance_weight")
+security = anchored_slider("Security", key="security_weight")
+territory = anchored_slider("Territory", key="territory_weight")
+property_q = anchored_slider("Property", key="property_weight")
 
 text = st.text_area("What kind of arrangement would you support, and why?")
 consent = st.checkbox("I consent to anonymous use of my response")
@@ -307,18 +525,21 @@ if st.button("Submit Response"):
             "id": str(uuid.uuid4()),
             "timestamp": datetime.now().isoformat(),
             "community": community,
-            "issue": issue,
+            "topic_id": selected_topic_id,
+            "issue": selected_topic_label,
+            "negotiation_restart": negotiation_restart,
             "governance": governance,
             "security": security,
             "territory": territory,
             "property": property_q,
             "text": text.strip(),
+            "is_seed": False,
         }
 
         responses_df = pd.concat([responses_df, pd.DataFrame([new_row])], ignore_index=True)
         save_csv(responses_df, RESPONSES_FILE)
         st.success("Response submitted successfully!")
-        responses_df = pd.read_csv(RESPONSES_FILE)
+        responses_df = normalize_response_topics(pd.read_csv(RESPONSES_FILE))
 
 # =========================================================
 # GENERATE CANDIDATE STATEMENTS
@@ -327,9 +548,10 @@ st.subheader("Generate candidate statements")
 
 scope = st.selectbox("Statement scope", ["All", "GC", "TC", "Other"], key="scope_select")
 max_responses = st.slider("Maximum responses to use", 3, 30, 12)
+st.caption(f"Candidate statements will use only responses about: {selected_topic_label}")
 
 if st.button("Generate Collective Statements"):
-    working_df = responses_df.copy()
+    working_df = responses_df[responses_df["topic_id"] == selected_topic_id].copy()
 
     if scope != "All":
         working_df = working_df[working_df["community"] == scope]
@@ -340,7 +562,7 @@ if st.button("Generate Collective Statements"):
         working_df = working_df[working_df["text"] != ""]
 
     generated_text, error = generate_candidate_statements(
-        working_df, scope, issue, max_responses=max_responses
+        working_df, scope, selected_topic_label, max_responses=max_responses
     )
 
     if error:
@@ -353,7 +575,8 @@ if st.button("Generate Collective Statements"):
             "round_id": round_id,
             "timestamp": datetime.now().isoformat(),
             "scope": scope,
-            "issue": issue,
+            "topic_id": selected_topic_id,
+            "issue": selected_topic_label,
             "statement_a": safe_text(parsed.get("A", "")),
             "statement_b": safe_text(parsed.get("B", "")),
             "statement_c": safe_text(parsed.get("C", "")),
@@ -369,7 +592,7 @@ if st.button("Generate Collective Statements"):
 
         st.session_state.latest_round_id = round_id
         st.success("Statements generated and saved.")
-        rounds_df = pd.read_csv(ROUNDS_FILE)
+        rounds_df = normalize_round_topics(pd.read_csv(ROUNDS_FILE))
 
 # =========================================================
 # DISPLAY LATEST ROUND
@@ -377,16 +600,21 @@ if st.button("Generate Collective Statements"):
 st.subheader("Candidate Statements")
 
 latest_round = None
+topic_rounds = rounds_df[rounds_df["topic_id"] == selected_topic_id].copy()
+
 if st.session_state.latest_round_id:
     match = rounds_df[rounds_df["round_id"] == st.session_state.latest_round_id]
-    if not match.empty:
+    if not match.empty and safe_text(match.iloc[-1].get("topic_id")) == selected_topic_id:
         latest_round = match.iloc[-1]
-elif not rounds_df.empty:
-    latest_round = rounds_df.iloc[-1]
+
+if latest_round is None and not topic_rounds.empty:
+    latest_round = topic_rounds.iloc[-1]
     st.session_state.latest_round_id = latest_round["round_id"]
 
 if latest_round is not None:
-    st.caption(f"Round ID: {latest_round['round_id']} | Scope: {latest_round['scope']}")
+    st.caption(
+        f"Round ID: {latest_round['round_id']} | Topic: {topic_short_label(selected_topic_id)} | Scope: {latest_round['scope']}"
+    )
 
     statement_map = {
         "A": safe_text(latest_round.get("statement_a", "")),
@@ -422,11 +650,12 @@ st.subheader("Rank the candidate statements")
 if latest_round is None:
     st.info("Generate statements first, then ranking will appear here.")
 else:
-    participant_community = st.selectbox(
-        "Your community (for ranking submission)",
-        ["", "GC", "TC", "Other"],
-        key="ranking_community"
+    ranking_community_label = st.selectbox(
+        "Please define your community",
+        list(COMMUNITY_OPTIONS.keys()),
+        key="ranking_community",
     )
+    participant_community = COMMUNITY_OPTIONS[ranking_community_label]
 
     st.write("Rank A–D from 1 (best) to 4 (worst). Each number must be used once.")
 
@@ -507,7 +736,7 @@ if latest_round is not None:
             if old_winner != result["winner"]:
                 rounds_df.at[idx, "winning_statement"] = result["winner"]
                 save_csv(rounds_df, ROUNDS_FILE)
-                rounds_df = pd.read_csv(ROUNDS_FILE)
+                rounds_df = normalize_round_topics(pd.read_csv(ROUNDS_FILE))
 
 # =========================================================
 # REFINED STATEMENT
@@ -530,7 +759,7 @@ else:
                 idx = round_idx[0]
                 rounds_df.at[idx, "refined_statement"] = safe_text(refined_text)
                 save_csv(rounds_df, ROUNDS_FILE)
-                rounds_df = pd.read_csv(ROUNDS_FILE)
+                rounds_df = normalize_round_topics(pd.read_csv(ROUNDS_FILE))
                 latest_round = rounds_df[rounds_df["round_id"] == current_round_id].iloc[-1]
 
             st.success("Refined statement generated.")
@@ -545,10 +774,10 @@ else:
 # OPTIONAL DATA DISPLAY
 # =========================================================
 if st.checkbox("Show collected responses"):
-    st.dataframe(responses_df.tail(20))
+    st.dataframe(responses_df[responses_df["topic_id"] == selected_topic_id].tail(20))
 
 if st.checkbox("Show statement rounds"):
-    st.dataframe(rounds_df.tail(10))
+    st.dataframe(rounds_df[rounds_df["topic_id"] == selected_topic_id].tail(10))
 
 if st.checkbox("Show rankings"):
     st.dataframe(rankings_df.tail(20))
