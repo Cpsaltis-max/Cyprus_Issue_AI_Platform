@@ -6,6 +6,9 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 from google import genai
+from supabase import create_client
+
+st.set_page_config(page_title="Cyprus Deliberation Platform", layout="wide")
 
 # =========================================================
 # CONFIG
@@ -18,9 +21,24 @@ except KeyError:
 
 client = genai.Client(api_key=API_KEY)
 
+try:
+    SUPABASE_URL = str(st.secrets["SUPABASE_URL"]).strip().rstrip("/")
+    SUPABASE_KEY = str(st.secrets["SUPABASE_KEY"]).strip()
+except KeyError:
+    SUPABASE_URL = ""
+    SUPABASE_KEY = ""
+
+supabase = None
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 RESPONSES_FILE = "responses.csv"
 ROUNDS_FILE = "statement_rounds.csv"
 RANKINGS_FILE = "rankings.csv"
+
+RESPONSES_TABLE = "hm_responses"
+ROUNDS_TABLE = "hm_statement_rounds"
+RANKINGS_TABLE = "hm_rankings"
 
 GSP_LOGO = Path("gsp_logo.png")
 UCFS_LOGO = Path("ucfs_logo.png")
@@ -54,6 +72,13 @@ COMMUNITY_OPTIONS = {
     "Greek Cypriot": "GC",
     "Turkish Cypriot": "TC",
     "Other": "Other",
+}
+
+CANDIDATE_TITLES = {
+    "A": "Majority-centered",
+    "B": "Conditional consensus",
+    "C": "Fairness-focused",
+    "D": "Minority-sensitive",
 }
 
 SEED_RESPONSES = {
@@ -185,7 +210,7 @@ def normalize_round_topics(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def ensure_seed_responses(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
+def ensure_seed_responses(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
     existing_ids = set(clean_text_series(df["id"]).tolist()) if "id" in df.columns else set()
     rows = []
 
@@ -212,9 +237,9 @@ def ensure_seed_responses(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
             )
 
     if not rows:
-        return df, False
+        return df, []
 
-    return pd.concat([df, pd.DataFrame(rows)], ignore_index=True), True
+    return pd.concat([df, pd.DataFrame(rows)], ignore_index=True), rows
 
 
 def show_logo_header() -> None:
@@ -233,12 +258,100 @@ def show_logo_header() -> None:
 
 def anchored_slider(label: str, key: str, value: int = 50) -> int:
     slider_value = st.slider(label, 0, 100, value, key=key)
-    left, spacer, right = st.columns([1.4, 2, 1.4])
-    with left:
-        st.caption("0 = Not at all important")
-    with right:
-        st.caption("100 = Very important")
+    st.markdown(
+        """
+        <div style="display:flex; justify-content:space-between; width:100%; color:#808495; font-size:0.9rem; margin-top:-0.5rem;">
+            <span>0 = Not at all important</span>
+            <span>100 = Very important</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     return slider_value
+
+
+def ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    out = df.copy()
+    for col in columns:
+        if col not in out.columns:
+            out[col] = pd.Series(dtype="object")
+    return out
+
+
+def load_records(table_name: str, csv_path: str, columns: list[str]) -> pd.DataFrame:
+    if supabase is None:
+        return load_csv(csv_path, columns)
+
+    try:
+        response = supabase.table(table_name).select("*").execute()
+        return ensure_columns(pd.DataFrame(response.data or []), columns)
+    except Exception as e:
+        st.error(f"Could not load data from Supabase table '{table_name}'.")
+        st.exception(e)
+        st.stop()
+
+
+def insert_record(table_name: str, csv_path: str, df: pd.DataFrame, row: dict, columns: list[str]) -> pd.DataFrame:
+    if supabase is None:
+        updated = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        save_csv(updated, csv_path)
+        return updated
+
+    try:
+        supabase.table(table_name).insert(row).execute()
+        return load_records(table_name, csv_path, columns)
+    except Exception as e:
+        st.error(f"Could not save data to Supabase table '{table_name}'.")
+        st.exception(e)
+        st.stop()
+
+
+def insert_records(table_name: str, csv_path: str, df: pd.DataFrame, rows: list[dict], columns: list[str]) -> pd.DataFrame:
+    if not rows:
+        return df
+
+    if supabase is None:
+        save_csv(df, csv_path)
+        return df
+
+    try:
+        supabase.table(table_name).insert(rows).execute()
+        return load_records(table_name, csv_path, columns)
+    except Exception as e:
+        st.error(f"Could not seed data in Supabase table '{table_name}'.")
+        st.exception(e)
+        st.stop()
+
+
+def update_record(table_name: str, id_column: str, id_value: str, updates: dict) -> None:
+    if supabase is None:
+        return
+
+    try:
+        supabase.table(table_name).update(updates).eq(id_column, id_value).execute()
+    except Exception as e:
+        st.error(f"Could not update Supabase table '{table_name}'.")
+        st.exception(e)
+        st.stop()
+
+
+def clean_candidate_statement(label: str, text: str) -> str:
+    statement = safe_text(text)
+    title = CANDIDATE_TITLES.get(label, "")
+    if not title:
+        return statement
+
+    statement = re.sub(rf"(?i)^{re.escape(title)}\s*[:\-]?\s*", "", statement).strip()
+    return statement
+
+
+def validate_candidate_statements(parsed: dict) -> list[str]:
+    missing = []
+    for label in ["A", "B", "C", "D"]:
+        text = safe_text(parsed.get(label, ""))
+        if len(text.split()) < 25:
+            missing.append(label)
+    return missing
 
 
 def parse_candidate_statements(raw_text: str) -> dict:
@@ -277,7 +390,7 @@ def parse_candidate_statements(raw_text: str) -> dict:
         end = matches[i + 1].start() if i < len(matches) - 1 else len(main_text)
         block = main_text[start:end].strip()
         block = re.sub(r'(?im)^\s*[A-D]\s*[:\.\)\-]?\s*', '', block, count=1).strip()
-        result[label] = block
+        result[label] = clean_candidate_statement(label, block)
 
     return result
 
@@ -321,6 +434,12 @@ STRICT RULES:
 - Keep disagreements visible but constructive
 - Each statement should be 60 to 120 words
 - Label each statement clearly with A, B, C, and D
+- Do not output category headings alone. Each of A, B, C, and D must contain a complete statement of 60 to 120 words.
+- Use this exact format:
+A: [complete majority-centered statement]
+B: [complete conditional consensus statement]
+C: [complete fairness-focused statement]
+D: [complete minority-sensitive statement]
 
 After the 4 statements, add:
 Key tensions:
@@ -449,14 +568,14 @@ rankings_cols = [
     "acceptable_statements", "critique"
 ]
 
-responses_df = load_csv(RESPONSES_FILE, responses_cols)
-rounds_df = load_csv(ROUNDS_FILE, rounds_cols)
-rankings_df = load_csv(RANKINGS_FILE, rankings_cols)
+responses_df = load_records(RESPONSES_TABLE, RESPONSES_FILE, responses_cols)
+rounds_df = load_records(ROUNDS_TABLE, ROUNDS_FILE, rounds_cols)
+rankings_df = load_records(RANKINGS_TABLE, RANKINGS_FILE, rankings_cols)
 
 responses_df = normalize_response_topics(responses_df)
-responses_df, seeds_added = ensure_seed_responses(responses_df)
-if seeds_added:
-    save_csv(responses_df, RESPONSES_FILE)
+responses_df, seed_rows = ensure_seed_responses(responses_df)
+responses_df = insert_records(RESPONSES_TABLE, RESPONSES_FILE, responses_df, seed_rows, responses_cols)
+responses_df = normalize_response_topics(responses_df)
 
 rounds_df = normalize_round_topics(rounds_df)
 
@@ -465,11 +584,6 @@ rounds_df = normalize_round_topics(rounds_df)
 # =========================================================
 if "latest_round_id" not in st.session_state:
     st.session_state.latest_round_id = None
-
-# =========================================================
-# PAGE
-# =========================================================
-st.set_page_config(page_title="Cyprus Deliberation Platform", layout="wide")
 
 show_logo_header()
 st.title("Cyprus Deliberation Platform")
@@ -541,10 +655,9 @@ if st.button("Submit Response"):
             "is_seed": False,
         }
 
-        responses_df = pd.concat([responses_df, pd.DataFrame([new_row])], ignore_index=True)
-        save_csv(responses_df, RESPONSES_FILE)
+        responses_df = insert_record(RESPONSES_TABLE, RESPONSES_FILE, responses_df, new_row, responses_cols)
         st.success("Response submitted successfully!")
-        responses_df = normalize_response_topics(pd.read_csv(RESPONSES_FILE))
+        responses_df = normalize_response_topics(responses_df)
 
 # =========================================================
 # GENERATE CANDIDATE STATEMENTS
@@ -574,6 +687,16 @@ if st.button("Generate Collective Statements"):
         st.error(error)
     else:
         parsed = parse_candidate_statements(generated_text)
+        missing_statements = validate_candidate_statements(parsed)
+        if missing_statements:
+            st.error(
+                "Gemini returned an incomplete candidate set. Please click Generate Collective Statements again. "
+                f"Missing or too short: {', '.join(missing_statements)}."
+            )
+            st.caption("The incomplete output was not saved.")
+            st.text_area("Raw incomplete output", generated_text, height=220)
+            st.stop()
+
         round_id = str(uuid.uuid4())
 
         new_round = {
@@ -592,12 +715,11 @@ if st.button("Generate Collective Statements"):
             "refined_statement": "",
         }
 
-        rounds_df = pd.concat([rounds_df, pd.DataFrame([new_round])], ignore_index=True)
-        save_csv(rounds_df, ROUNDS_FILE)
+        rounds_df = insert_record(ROUNDS_TABLE, ROUNDS_FILE, rounds_df, new_round, rounds_cols)
 
         st.session_state.latest_round_id = round_id
         st.success("Statements generated and saved.")
-        rounds_df = normalize_round_topics(pd.read_csv(ROUNDS_FILE))
+        rounds_df = normalize_round_topics(rounds_df)
 
 # =========================================================
 # DISPLAY LATEST ROUND
@@ -605,6 +727,7 @@ if st.button("Generate Collective Statements"):
 st.subheader("Candidate Statements")
 
 latest_round = None
+latest_round_complete = False
 topic_rounds = rounds_df[rounds_df["topic_id"] == selected_topic_id].copy()
 
 if st.session_state.latest_round_id:
@@ -627,17 +750,19 @@ if latest_round is not None:
         "C": safe_text(latest_round.get("statement_c", "")),
         "D": safe_text(latest_round.get("statement_d", "")),
     }
-    title_map = {
-        "A": "Majority-centered",
-        "B": "Conditional consensus",
-        "C": "Fairness-focused",
-        "D": "Minority-sensitive",
-    }
+    incomplete_existing = validate_candidate_statements(statement_map)
+    latest_round_complete = not incomplete_existing
+
+    if incomplete_existing:
+        st.warning(
+            "This saved statement round is incomplete and should not be ranked. "
+            f"Generate a new collective statement round. Missing or too short: {', '.join(incomplete_existing)}."
+        )
 
     for label in ["A", "B", "C", "D"]:
         value = statement_map[label]
         if value:
-            st.markdown(f"**{label}: {title_map[label]}**  \n{value}")
+            st.markdown(f"**{label}: {CANDIDATE_TITLES[label]}**  \n{value}")
 
     key_tensions = safe_text(latest_round.get("key_tensions", ""))
     if key_tensions:
@@ -654,6 +779,8 @@ st.subheader("Rank the candidate statements")
 
 if latest_round is None:
     st.info("Generate statements first, then ranking will appear here.")
+elif not latest_round_complete:
+    st.info("Generate a complete statement round before ranking.")
 else:
     ranking_community_label = st.selectbox(
         "Please define your community",
@@ -700,10 +827,8 @@ else:
                 "critique": critique.strip(),
             }
 
-            rankings_df = pd.concat([rankings_df, pd.DataFrame([new_ranking])], ignore_index=True)
-            save_csv(rankings_df, RANKINGS_FILE)
+            rankings_df = insert_record(RANKINGS_TABLE, RANKINGS_FILE, rankings_df, new_ranking, rankings_cols)
             st.success("Ranking submitted.")
-            rankings_df = pd.read_csv(RANKINGS_FILE)
 
 # =========================================================
 # CURRENT WINNER
@@ -740,8 +865,17 @@ if latest_round is not None:
             old_winner = safe_text(rounds_df.at[idx, "winning_statement"])
             if old_winner != result["winner"]:
                 rounds_df.at[idx, "winning_statement"] = result["winner"]
-                save_csv(rounds_df, ROUNDS_FILE)
-                rounds_df = normalize_round_topics(pd.read_csv(ROUNDS_FILE))
+                if supabase is None:
+                    save_csv(rounds_df, ROUNDS_FILE)
+                else:
+                    update_record(
+                        ROUNDS_TABLE,
+                        "round_id",
+                        latest_round["round_id"],
+                        {"winning_statement": result["winner"]},
+                    )
+                    rounds_df = load_records(ROUNDS_TABLE, ROUNDS_FILE, rounds_cols)
+                rounds_df = normalize_round_topics(rounds_df)
 
 # =========================================================
 # REFINED STATEMENT
@@ -763,8 +897,17 @@ else:
             if len(round_idx) > 0:
                 idx = round_idx[0]
                 rounds_df.at[idx, "refined_statement"] = safe_text(refined_text)
-                save_csv(rounds_df, ROUNDS_FILE)
-                rounds_df = normalize_round_topics(pd.read_csv(ROUNDS_FILE))
+                if supabase is None:
+                    save_csv(rounds_df, ROUNDS_FILE)
+                else:
+                    update_record(
+                        ROUNDS_TABLE,
+                        "round_id",
+                        current_round_id,
+                        {"refined_statement": safe_text(refined_text)},
+                    )
+                    rounds_df = load_records(ROUNDS_TABLE, ROUNDS_FILE, rounds_cols)
+                rounds_df = normalize_round_topics(rounds_df)
                 latest_round = rounds_df[rounds_df["round_id"] == current_round_id].iloc[-1]
 
             st.success("Refined statement generated.")
