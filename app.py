@@ -10,7 +10,12 @@ from google import genai
 # =========================================================
 # CONFIG
 # =========================================================
-API_KEY = "AIzaSyC9Gr5n6ptSI0qPqR1Ah5nXqhr0azuOc3w"
+try:
+    API_KEY = st.secrets["GEMINI_API_KEY"]
+except KeyError:
+    st.error("Gemini is not configured. Add GEMINI_API_KEY to the app secrets in Streamlit Cloud.")
+    st.stop()
+
 client = genai.Client(api_key=API_KEY)
 
 RESPONSES_FILE = "responses.csv"
